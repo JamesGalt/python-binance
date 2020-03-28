@@ -1,92 +1,171 @@
 import asyncio
-import json
 import logging
+import socket
 from random import random
-import websockets as ws
+from typing import Dict, Optional, Union, Callable, List
+from typing import AsyncGenerator
+from typing import Tuple
+import orjson
+from aiohttp import ClientSession
+from websockets.client import connect
+from websockets.exceptions import ConnectionClosed
+from websockets.client import WebSocketClientProtocol
+from binance.client import Client
+import settings
 
-from .client import Client
+_logger = logging.getLogger()
+async def parse_historical_trades(msg:Dict)->Dict:
+    """"[
+        {
+            "id": 28457,
+            "price": "4.00000100",
+            "qty": "12.00000000",
+            "quoteQty": "48.000012",
+            "time": 1499865549590,
+            "isBuyerMaker": true,
+            "isBestMatch": true
+        }
+    ]"""
+
+
+async def get_historical_trades(symbol:str, first_bound:int, last_bound:int)->AsyncGenerator:
+
+
+    found = False
+    from_=first_bound
+    async with ClientSession() as session:
+        while not found:
+            params= {"symbol":symbol,"fromId":from_ }
+            async with session.get(settings.REST_BASE_ENDPOINT+settings.HISTORICAL_TRADES_ENDPOINT) as response:
+                data = await response.json()
+            for ele in data:
+                if ele["id"] == last_bound:
+                    found=True
+                    break
+                elif ele["id"]<last_bound:
+                    yield await parse_historical_trades(ele)
+            from_= ele["id"]
+
+
+
+MAP_WS_API_FN: Dict[str, Callable] = {"trade":get_historical_trades}
+
+async def get_missing(clientpath: str, coro: Callable, first_bound: int, last_bound: int) -> None:
+    (symbol, api, *_) = path.split("@")
+    if func:= MAP_WS_API_FN.get(api):
+        missed = await func(symbol.upper, first_bound, last_bound)
+        for ele in missed:
+            await coro(ele)
 
 
 class ReconnectingWebsocket:
 
-    STREAM_URL = 'wss://stream.binance.com:9443/'
-    MAX_RECONNECTS = 5
+    STREAM_URL = "wss://stream.binance.com:9443/"
+    MAX_RECONNECTS = 10
     MAX_RECONNECT_SECONDS = 60
     MIN_RECONNECT_WAIT = 0.1
     TIMEOUT = 10
 
-    def __init__(self, loop, path, coro, prefix='ws/'):
+    def __init__(self, client:Client, loop: asyncio.AbstractEventLoop, path: str, coro: Callable, prefix: str = "ws/") -> None:
         self._loop = loop
         self._log = logging.getLogger(__name__)
         self._path = path
         self._coro = coro
         self._prefix = prefix
         self._reconnects = 0
-        self._conn = None
-        self._socket = None
+        self._conn: Optional[asyncio.Future] = None
+        self._socket: Optional[WebSocketClientProtocol] = None
 
         self._connect()
 
-    def _connect(self):
+    def _connect(self) -> None:
         self._conn = asyncio.ensure_future(self._run(), loop=self._loop)
 
-    async def _run(self):
+    async def _run(self) -> None:
 
         keep_waiting = True
 
         ws_url = self.STREAM_URL + self._prefix + self._path
-        async with ws.connect(ws_url) as socket:
-            self._socket = socket
-            self._reconnects = 0
-
-            try:
+        try:
+            async with connect(ws_url, ping_interval=10, ping_timeout=2, timeout=2) as _socket:
+                _logger.warning(f"Connected to {self._path}")
+                self._socket = _socket
+                self._reconnects = 0
                 while keep_waiting:
                     try:
                         evt = await asyncio.wait_for(self._socket.recv(), timeout=self.TIMEOUT)
-                    except asyncio.TimeoutError:
-                        self._log.debug("no message in {} seconds".format(self.TIMEOUT))
-                        await self.send_ping()
-                    except asyncio.CancelledError:
-                        self._log.debug("cancelled error")
-                        await self.send_ping()
+                    except (asyncio.TimeoutError, ConnectionClosed):
+                        try:
+                            pong = await self._socket.ping()
+                            await asyncio.wait_for(pong, timeout=self._socket.ping_timeout)
+                            _logger.debug("Ping OK, keeping connection alive...")
+                            continue
+                        except Exception:
+                            raise
+                    # except asyncio.CancelledError:
+                    #     self._log.debug("cancelled error")
+                    #     raise asyncio.CancelledError
                     else:
                         try:
-                            evt_obj = json.loads(evt)
-                        except ValueError:
-                            self._log.debug('error parsing evt json:{}'.format(evt))
+                            evt_obj = orjson.loads(evt)
+                        except (orjson.JSONDecodeError, orjson.JSONEncodeError):
+                            self._log.error(f"error parsing evt json:{str(evt)}")
                         else:
                             await self._coro(evt_obj)
-            except ws.ConnectionClosed as e:
-                self._log.debug('ws connection closed:{}'.format(e))
-                await self._reconnect()
-            except Exception as e:
-                self._log.debug('ws exception:{}'.format(e))
-                await self._reconnect()
+
+        except socket.gaierror as e:
+            self._log.debug(e)
+            await self._reconnect()
+
+        except asyncio.CancelledError:
+            self._log.debug("cancelled error")
+            await self._reconnect()
+
+        except ConnectionClosed as e:
+            self._log.debug("ws connection closed:{}".format(e))
+            await self._reconnect()
+        except Exception as e:
+            self._log.debug('ws exception:{}'.format(e))
+            await self._reconnect()
 
     def _get_reconnect_wait(self, attempts: int) -> int:
         expo = 2 ** attempts
         return round(random() * min(self.MAX_RECONNECT_SECONDS, expo - 1) + 1)
 
-    async def _reconnect(self):
+    async def _reconnect(self) -> None:
         await self.cancel()
         self._reconnects += 1
         if self._reconnects < self.MAX_RECONNECTS:
-
-            self._log.debug("websocket {} reconnecting {} reconnects left".format(
-                self._path, self.MAX_RECONNECTS - self._reconnects)
-            )
             reconnect_wait = self._get_reconnect_wait(self._reconnects)
+
+            self._log.info(
+                f"websocket {self._path} reconnecting "
+                f"{self.MAX_RECONNECTS - self._reconnects} "
+                f"reconnects left waiting {reconnect_wait}"
+            )
             await asyncio.sleep(reconnect_wait)
             self._connect()
         else:
-            self._log.error('Max reconnections {} reached:'.format(self.MAX_RECONNECTS))
+            self._log.error("Max reconnections {} reached:".format(self.MAX_RECONNECTS))
 
-    async def send_ping(self):
+    async def send_ping(self) -> None:
         if self._socket:
             await self._socket.ping()
 
-    async def cancel(self):
-        self._conn.cancel()
+    async def cancel(self) -> None:
+        self._log.warning(f"Cancelling {self._path}")
+        if self._socket:
+            self._log.debug("Closing socket")
+            await self._socket.close()
+            self._log.debug("Socket Closed")
+        if self._conn:
+            self._conn.cancel()
+            try:
+                self._log.debug("Cancelling Task")
+                await self._conn
+            except asyncio.CancelledError:
+                pass
+        self._log.debug("Task Cancelled")
         self._socket = None
 
 
@@ -98,14 +177,14 @@ class BinanceSocketManager:
 
     _user_timeout = 30 * 60  # 30 minutes
 
-    def __init__(self, client, loop):
+    def __init__(self, client:Client, loop:asyncio.AbstractEventLoop)->None:
         """Initialise the BinanceSocketManager
 
         :param client: Binance API client
         :type client: binance.Client
 
         """
-        self._conns = {}
+        self._conns:Dict = {}
         self._user_timer = None
         self._user_listen_key = None
         self._user_callback = None
@@ -113,15 +192,15 @@ class BinanceSocketManager:
         self._loop = loop
         self._log = logging.getLogger(__name__)
 
-    async def _start_socket(self, path, coro, prefix='ws/'):
+    async def _start_socket(self, path:str, coro:Callable, prefix:str='ws/')->Optional[str]:
         if path in self._conns:
-            return False
+            return None
 
-        self._conns[path] = ReconnectingWebsocket(self._loop, path, coro, prefix)
+        self._conns[path] = ReconnectingWebsocket(self._client, self._loop, path, coro, prefix)
 
         return path
 
-    async def start_depth_socket(self, symbol, coro, depth=None):
+    async def start_depth_socket(self, symbol:str, coro:Callable, depth:Optional[int]=None)->str:
         """Start a websocket for symbol market depth returning either a diff or a partial book
 
         https://github.com/binance-exchange/binance-official-api-docs/blob/master/web-socket-streams.md#partial-book-depth-streams
@@ -189,8 +268,9 @@ class BinanceSocketManager:
         if depth and depth != '1':
             socket_name = '{}{}'.format(socket_name, depth)
         await self._start_socket(socket_name, coro)
+        return socket_name
 
-    async def start_kline_socket(self, symbol, coro, interval=Client.KLINE_INTERVAL_1MINUTE):
+    async def start_kline_socket(self, symbol:str, coro:Callable, interval:str=Client.KLINE_INTERVAL_1MINUTE)->str:
         """Start a websocket for symbol kline data
 
         https://github.com/binance-exchange/binance-official-api-docs/blob/master/web-socket-streams.md#klinecandlestick-streams
@@ -237,7 +317,7 @@ class BinanceSocketManager:
         await self._start_socket(path, coro)
         return path
 
-    async def start_miniticker_socket(self, coro, update_time=1000):
+    async def start_miniticker_socket(self, coro:Callable, update_time:Optional[int]=1000)->str:
         """Start a miniticker websocket for all trades
 
         This is not in the official Binance api docs, but this is what
@@ -273,7 +353,7 @@ class BinanceSocketManager:
         await self._start_socket('!miniTicker@arr@{}ms'.format(update_time), coro)
         return path
 
-    async def start_trade_socket(self, symbol, coro):
+    async def start_trade_socket(self, symbol:str, coro:Callable)->str:
         """Start a websocket for symbol trade data
 
         https://github.com/binance-exchange/binance-official-api-docs/blob/master/web-socket-streams.md#trade-streams
@@ -310,7 +390,7 @@ class BinanceSocketManager:
         await self._start_socket(path, coro)
         return path
 
-    async def start_aggtrade_socket(self, symbol, coro):
+    async def start_aggtrade_socket(self, symbol:str, coro:Callable)->str:
         """Start a websocket for symbol trade data
 
         https://github.com/binance-exchange/binance-official-api-docs/blob/master/web-socket-streams.md#aggregate-trade-streams
@@ -345,7 +425,7 @@ class BinanceSocketManager:
         await self._start_socket(symbol.lower() + '@aggTrade', coro)
         return path
 
-    async def start_symbol_ticker_socket(self, symbol, coro):
+    async def start_symbol_ticker_socket(self, symbol:str, coro:Callable)->str:
         """Start a websocket for a symbol's ticker data
 
         https://github.com/binance-exchange/binance-official-api-docs/blob/master/web-socket-streams.md#individual-symbol-ticker-streams
@@ -392,7 +472,7 @@ class BinanceSocketManager:
         await self._start_socket(symbol.lower() + '@ticker', coro)
         return path
 
-    async def start_ticker_socket(self, coro):
+    async def start_ticker_socket(self, coro:Callable)->str:
         """Start a websocket for all ticker data
 
         By default all markets are included in an array.
@@ -438,7 +518,7 @@ class BinanceSocketManager:
         await self._start_socket(path, coro)
         return path
 
-    async def start_multiplex_socket(self, streams, coro):
+    async def start_multiplex_socket(self, streams:List[str], coro:Callable)->str:
         """Start a multiplexed socket using a list of socket names.
         User stream sockets can not be included.
 
@@ -462,7 +542,7 @@ class BinanceSocketManager:
         await self._start_socket(path, coro, 'stream?')
         return path
 
-    async def start_user_socket(self, coro):
+    async def start_user_socket(self, coro:Callable)->str:
         """Start a websocket for user data
 
         https://www.binance.com/restapipub.html#user-wss-endpoint
@@ -480,7 +560,7 @@ class BinanceSocketManager:
         conn_key = await self._start_user_socket(user_listen_key, coro)
         return conn_key
 
-    async def _start_user_socket(self, user_listen_key, callback):
+    async def _start_user_socket(self, user_listen_key:str, callback:Callable)->str:
         # With this function we can start a user socket with a specific key
         if self._user_listen_key:
             # cleanup any sockets with this key
@@ -497,10 +577,10 @@ class BinanceSocketManager:
 
         return conn_key
 
-    def _start_user_timer(self):
+    def _start_user_timer(self)->None:
         self._user_timer = self._loop.call_later(self._user_timeout, self._keepalive_user_socket)
 
-    def _keepalive_user_socket(self):
+    def _keepalive_user_socket(self)->None:
 
         async def _run():
             user_listen_key = await self._client.stream_get_listen_key()
@@ -518,7 +598,7 @@ class BinanceSocketManager:
         # this allows execution to keep going
         asyncio.ensure_future(_run())
 
-    async def stop_socket(self, conn_key):
+    async def stop_socket(self, conn_key:str)->None:
         """Stop a websocket given the connection key
 
         :param conn_key: Socket connection key
@@ -537,7 +617,7 @@ class BinanceSocketManager:
         if len(conn_key) >= 60 and conn_key[:60] == self._user_listen_key:
             await self._stop_user_socket()
 
-    async def _stop_user_socket(self):
+    async def _stop_user_socket(self)->None:
         if not self._user_listen_key:
             return
         # stop the timer
@@ -548,7 +628,7 @@ class BinanceSocketManager:
         await self._client.stream_close(listenKey=self._user_listen_key)
         self._user_listen_key = None
 
-    async def close(self):
+    async def close(self)->None:
         """Close all connections
 
         """
