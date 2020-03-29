@@ -3,6 +3,7 @@
 
 import asyncio
 import inspect
+
 MISSING = object()
 __all__ = ["RestartableTask", "Dispatch", "EventHandler"]
 __version__ = "0.3.2"
@@ -10,6 +11,7 @@ __version__ = "0.3.2"
 
 class Event:
     """ Two-part event, can be started and completed. """
+
     def __init__(self, *, loop):
         self._start = asyncio.Event(loop=loop)
         self._complete = asyncio.Event(loop=loop)
@@ -79,6 +81,7 @@ class RestartableTask:
 
 class Dispatch(RestartableTask):
     """ Dispatch unpacked **kwargs to callbacks when events occur """
+
     def __init__(self, *, loop):
         super().__init__(loop=loop)
         self._handlers = {}
@@ -181,7 +184,6 @@ class Dispatch(RestartableTask):
 
 
 class EventHandler(RestartableTask):
-
     def __init__(self, event, keys, *, loop):
         super().__init__(loop=loop)
         self.event = event
@@ -192,8 +194,7 @@ class EventHandler(RestartableTask):
     def __call__(self, kwargs):
         # Don't handle the call if we're shutting down
         if not self.running:
-            raise RuntimeError(
-                "EventHandler must be running to delegate events")
+            raise RuntimeError("EventHandler must be running to delegate events")
 
         filtered_kwargs = {}
         for key in self.keys:

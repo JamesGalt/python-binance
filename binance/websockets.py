@@ -11,15 +11,13 @@ from typing import Tuple
 from typing import Union
 
 import orjson
-from accordian import Dispatch
+from binance.accordian import Dispatch
 from aiohttp import ClientSession
 from binance import enums
 from binance.client import AsyncClient
 from websockets.client import WebSocketClientProtocol
 from websockets.client import connect
 from websockets.exceptions import ConnectionClosed
-
-_logger = logging.getLogger()
 
 
 class ReconnectingWebsocket:
@@ -28,7 +26,7 @@ class ReconnectingWebsocket:
     MAX_RECONNECTS = 20
     MAX_RECONNECT_SECONDS = 60
     MIN_RECONNECT_WAIT = 0.1
-    TIMEOUT = 2
+    TIMEOUT = 5
 
     def __init__(
         self,
@@ -36,6 +34,7 @@ class ReconnectingWebsocket:
         path: str,
         coro: Callable,
         prefix: str = "ws/",
+        dispatch: Optional[Dispatch] = None,
     ) -> None:
         self._loop = loop
         self._log = logging.getLogger(__name__)
@@ -43,9 +42,14 @@ class ReconnectingWebsocket:
         self._coro = coro
         self._prefix = prefix
 
+        self.dispatch = dispatch
+
         self._reconnects = 0
         self._conn: Optional[asyncio.Future] = None
         self._socket: Optional[WebSocketClientProtocol] = None
+        self.has_been_disconnected = True
+        self.last_msg: Optional[Dict] = None
+
         self._connect()
 
     def _connect(self) -> None:
@@ -57,24 +61,18 @@ class ReconnectingWebsocket:
 
         ws_url = self.STREAM_URL + self._prefix + self._path
         try:
-            async with connect(
-                ws_url, ping_interval=self.TIMEOUT, ping_timeout=self.TIMEOUT, timeout=self.TIMEOUT
-            ) as _socket:
-                _logger.warning(f"Connected to {self._path}")
+            async with connect(ws_url, ping_interval=2, ping_timeout=2, timeout=self.TIMEOUT,) as _socket:
+                self._log.warning(f"Connected to {self._path}")
                 self._socket = _socket
                 self._reconnects = 0
                 while keep_waiting:
                     try:
-                        evt = await asyncio.wait_for(
-                            self._socket.recv(), timeout=self.TIMEOUT
-                        )
+                        evt = await asyncio.wait_for(self._socket.recv(), timeout=2)
                     except (asyncio.TimeoutError, ConnectionClosed):
                         try:
                             pong = await self._socket.ping()
-                            await asyncio.wait_for(
-                                pong, timeout=self._socket.ping_timeout
-                            )
-                            _logger.debug("Ping OK, keeping connection alive...")
+                            await asyncio.wait_for(pong, timeout=self._socket.ping_timeout)
+                            self._log.debug("Ping OK, keeping connection alive...")
                             continue
                         except Exception:
                             raise
@@ -87,7 +85,17 @@ class ReconnectingWebsocket:
                         except (orjson.JSONDecodeError, orjson.JSONEncodeError):
                             self._log.error(f"error parsing evt json:{str(evt)}")
                         else:
+                            if (
+                                self.dispatch
+                                and self.has_been_disconnected
+                                and "binance_ws_disconnected" in self.dispatch._handlers
+                            ):
+                                await self.dispatch.trigger(
+                                    "binance_ws_connected", {"path": self._path, "msg": evt_obj},
+                                )
+                                self.has_been_disconnected = False
                             await self._coro(evt_obj)
+                            self.last_msg = evt_obj
 
         except socket.gaierror as e:
             self._log.debug(e)
@@ -110,6 +118,9 @@ class ReconnectingWebsocket:
 
     async def _reconnect(self) -> None:
         await self.cancel()
+        if self.dispatch and "binance_ws_disconnected" in self.dispatch._handlers and not self.has_been_disconnected:
+            await self.dispatch.trigger("binance_ws_disconnected", {"path": self._path, "msg": self.last_msg})
+        self.has_been_disconnected = True
         self._reconnects += 1
         if self._reconnects < self.MAX_RECONNECTS:
             reconnect_wait = self._get_reconnect_wait(self._reconnects)
@@ -153,7 +164,9 @@ class BinanceSocketManager:
 
     _user_timeout = 30 * 60  # 30 minutes
 
-    def __init__(self, client: AsyncClient, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self, client: AsyncClient, loop: asyncio.AbstractEventLoop, dispatch: Optional[Dispatch] = None,
+    ) -> None:
         """Initialise the BinanceSocketManager
 
         :param client: Binance API client
@@ -167,22 +180,24 @@ class BinanceSocketManager:
         self._client = client
         self._loop = loop
         self._log = logging.getLogger(__name__)
-        self.dispatch = Dispatch(loop=self._loop)
 
-    async def _start_socket(
-        self, path: str, coro: Callable, prefix: str = "ws/"
-    ) -> Optional[str]:
+        self.dispatch = dispatch
+        if self.dispatch:
+            dispatch.register(f"binance_ws_connected", ["path", "msg"])
+            dispatch.register(f"binance_ws_disconnected", ["path", "msg"])
+
+        self._loop.create_task(self.dispatch.start())
+
+    async def _start_socket(self, path: str, coro: Callable, prefix: str = "ws/") -> Optional[str]:
 
         if path in self._conns:
             return None
 
-        self._conns[path] = ReconnectingWebsocket(self._loop, path, coro, prefix)
+        self._conns[path] = ReconnectingWebsocket(self._loop, path, coro, prefix, self.dispatch)
 
         return path
 
-    async def start_depth_socket(
-        self, symbol: str, coro: Callable, depth: Optional[int] = None
-    ) -> str:
+    async def start_depth_socket(self, symbol: str, coro: Callable, depth: Optional[int] = None) -> str:
         """Start a websocket for symbol market depth returning either a diff or a partial book
 
         https://github.com/binance-exchange/binance-official-api-docs/blob/master/web-socket-streams.md#partial-book-depth-streams
@@ -301,9 +316,7 @@ class BinanceSocketManager:
         await self._start_socket(path, coro)
         return path
 
-    async def start_miniticker_socket(
-        self, coro: Callable, update_time: Optional[int] = 1000
-    ) -> str:
+    async def start_miniticker_socket(self, coro: Callable, update_time: Optional[int] = 1000) -> str:
         """Start a miniticker websocket for all trades
 
         This is not in the official Binance api docs, but this is what
@@ -564,16 +577,12 @@ class BinanceSocketManager:
         return conn_key
 
     def _start_user_timer(self) -> None:
-        self._user_timer = self._loop.call_later(
-            self._user_timeout, self._keepalive_user_socket
-        )
+        self._user_timer = self._loop.call_later(self._user_timeout, self._keepalive_user_socket)
 
     def _keepalive_user_socket(self) -> None:
         async def _run():
             user_listen_key = await self._client.stream_get_listen_key()
-            self._log.debug(
-                "new key {} old key {}".format(user_listen_key, self._user_listen_key)
-            )
+            self._log.debug("new key {} old key {}".format(user_listen_key, self._user_listen_key))
             # check if they key changed and reconnect
             if user_listen_key != self._user_listen_key:
                 # Start a new socket with the key received
@@ -624,5 +633,5 @@ class BinanceSocketManager:
         keys = set(self._conns.keys())
         for key in keys:
             await self.stop_socket(key)
-
+        await self.dispatch.stop()
         self._conns = {}
