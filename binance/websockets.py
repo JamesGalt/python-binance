@@ -11,9 +11,10 @@ from typing import Tuple
 from typing import Union
 
 import orjson
+from accordian import Dispatch
 from aiohttp import ClientSession
-from binance.client import AsyncClient
 from binance import enums
+from binance.client import AsyncClient
 from websockets.client import WebSocketClientProtocol
 from websockets.client import connect
 from websockets.exceptions import ConnectionClosed
@@ -166,6 +167,7 @@ class BinanceSocketManager:
         self._client = client
         self._loop = loop
         self._log = logging.getLogger(__name__)
+        self.dispatch = Dispatch(loop=self._loop)
 
     async def _start_socket(
         self, path: str, coro: Callable, prefix: str = "ws/"

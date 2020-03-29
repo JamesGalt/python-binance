@@ -27,7 +27,7 @@ setup(
     author_email='',
     install_requires=[
         'requests', 'six', 'pyOpenSSL', 'service-identity', 'dateparser', 'urllib3', 'chardet', 'certifi',
-        'cryptography', 'aiohttp', 'accordian'
+        'cryptography', 'aiohttp'
     ],
     keywords='binance exchange rest api bitcoin ethereum btc eth neo',
     classifiers=[
