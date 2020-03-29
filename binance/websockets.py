@@ -18,18 +18,16 @@ from websockets.client import WebSocketClientProtocol
 from websockets.client import connect
 from websockets.exceptions import ConnectionClosed
 
-import settings
-
 _logger = logging.getLogger()
 
 
 class ReconnectingWebsocket:
 
     STREAM_URL = "wss://stream.binance.com:9443/"
-    MAX_RECONNECTS = 10
+    MAX_RECONNECTS = 20
     MAX_RECONNECT_SECONDS = 60
     MIN_RECONNECT_WAIT = 0.1
-    TIMEOUT = 10
+    TIMEOUT = 2
 
     def __init__(
         self,
@@ -47,7 +45,6 @@ class ReconnectingWebsocket:
         self._reconnects = 0
         self._conn: Optional[asyncio.Future] = None
         self._socket: Optional[WebSocketClientProtocol] = None
-
         self._connect()
 
     def _connect(self) -> None:
@@ -60,7 +57,7 @@ class ReconnectingWebsocket:
         ws_url = self.STREAM_URL + self._prefix + self._path
         try:
             async with connect(
-                ws_url, ping_interval=10, ping_timeout=2, timeout=2
+                ws_url, ping_interval=self.TIMEOUT, ping_timeout=self.TIMEOUT, timeout=self.TIMEOUT
             ) as _socket:
                 _logger.warning(f"Connected to {self._path}")
                 self._socket = _socket
