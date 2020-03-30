@@ -47,7 +47,7 @@ class ReconnectingWebsocket:
         self._reconnects = 0
         self._conn: Optional[asyncio.Future] = None
         self._socket: Optional[WebSocketClientProtocol] = None
-        self.has_been_disconnected = True
+        self.has_been_disconnected = False
         self.last_msg: Optional[Dict] = None
 
         self._connect()

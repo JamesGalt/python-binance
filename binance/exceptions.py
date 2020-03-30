@@ -28,6 +28,13 @@ class BinanceRequestException(Exception):
     def __str__(self):
         return 'BinanceRequestException: %s' % self.message
 
+class BinanceRequestLimitException(Exception):
+    def __init__(self, message):
+        self.message = message
+
+    def __str__(self):
+        return 'BinanceRequestLimitException: %s' % self.message
+
 
 class BinanceOrderException(Exception):
 
