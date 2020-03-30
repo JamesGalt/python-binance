@@ -1,8 +1,10 @@
 # coding=utf-8
 import json
 
+class BaseBinanceException(Exception):
+    pass
 
-class BinanceAPIException(Exception):
+class BinanceAPIException(BaseBinanceException):
 
     def __init__(self, response, status_code, text):
         self.code = 0
@@ -21,14 +23,14 @@ class BinanceAPIException(Exception):
         return 'APIError(code=%s): %s' % (self.code, self.message)
 
 
-class BinanceRequestException(Exception):
+class BinanceRequestException(BaseBinanceException):
     def __init__(self, message):
         self.message = message
 
     def __str__(self):
         return 'BinanceRequestException: %s' % self.message
 
-class BinanceRequestLimitException(Exception):
+class BinanceRequestLimitException(BaseBinanceException):
     def __init__(self, message):
         self.message = message
 
@@ -36,7 +38,7 @@ class BinanceRequestLimitException(Exception):
         return 'BinanceRequestLimitException: %s' % self.message
 
 
-class BinanceOrderException(Exception):
+class BinanceOrderException(BaseBinanceException):
 
     def __init__(self, code, message):
         self.code = code
@@ -81,7 +83,7 @@ class BinanceOrderInactiveSymbolException(BinanceOrderException):
         super(BinanceOrderInactiveSymbolException, self).__init__(-1013, message)
 
 
-class BinanceWithdrawException(Exception):
+class BinanceWithdrawException(BaseBinanceException):
     def __init__(self, message):
         if message == u'参数异常':
             message = 'Withdraw to this address through the website first'

@@ -2068,9 +2068,16 @@ class AsyncClient(BaseClient):
     def __init__(self, api_key="", api_secret="", requests_params=None):
         self._rate_limit = self.DEFAULT_MINUTE_RATE_LIMIT
         self._rate_limit_lock = asyncio.Lock()
-        asyncio.ensure_future(self.cron_reset_rate_limit())
+        asyncio.create_task(self.cron_reset_rate_limit(), name="cron_reset_rate_limit")
 
-        super(AsyncClient, self).__init__(api_key="", api_secret="", requests_params=None)
+        super(AsyncClient, self).__init__(api_key=api_key, api_secret=api_secret, requests_params=requests_params)
+
+    async def __aenter__(self):
+        await self.ping()
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, exc_traceback):
+        await self.session.close()
 
     @classmethod
     async def create(cls, api_key="", api_secret="", requests_params=None):
@@ -2130,9 +2137,9 @@ class AsyncClient(BaseClient):
 
     async def _get(self, path, signed=False, version=BaseClient.PUBLIC_API_VERSION, **kwargs):
         if "weight" in kwargs:
-            weight=kwargs.pop("weight")
+            weight = kwargs.pop("weight")
         else:
-            weight=1
+            weight = 1
         async with self._rate_limit_lock:
             if self._rate_limit - weight <= 0:
                 raise BinanceRequestLimitException("Request would exceed the limit")
@@ -2198,7 +2205,7 @@ class AsyncClient(BaseClient):
     depth_weight_map = {5: 1, 10: 1, 20: 1, 50: 1, 100: 1, 500: 5, 100: 10, 5000: 50}
 
     async def get_order_book(self, **params):
-        weight = depth_weight_map.get(params.get("depth", 1),1)
+        weight = depth_weight_map.get(params.get("depth", 1), 1)
         return await self._get("depth", data=params, weight=weight)
 
     get_order_book.__doc__ = Client.get_order_book.__doc__
@@ -2382,27 +2389,27 @@ class AsyncClient(BaseClient):
 
     async def get_ticker(self, **params):
         if "symbol" not in params:
-            weight=40
+            weight = 40
         else:
-            weight=1
+            weight = 1
         return await self._get("ticker/24hr", data=params, weight=weight)
 
     get_ticker.__doc__ = Client.get_ticker.__doc__
 
     async def get_symbol_ticker(self, **params):
         if "symbol" not in params:
-            weight=2
+            weight = 2
         else:
-            weight=1
+            weight = 1
         return await self._get("ticker/price", data=params, weight=weight)
 
     get_symbol_ticker.__doc__ = Client.get_symbol_ticker.__doc__
 
     async def get_orderbook_ticker(self, **params):
         if "symbol" not in params:
-            weight=2
+            weight = 2
         else:
-            weight=1
+            weight = 1
         return await self._get("ticker/bookTicker", data=params, weight=weight)
 
     get_orderbook_ticker.__doc__ = Client.get_orderbook_ticker.__doc__
