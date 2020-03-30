@@ -90,7 +90,7 @@ class ReconnectingWebsocket:
                             ):
                                 asyncio.create_task(
                                     self.dispatch.trigger("binance_ws_connected", {"path": self._path, "msg": evt_obj}),
-                                    name=f"{self._path_}binance_ws_connected_handler",
+                                    name=f"{self._path}binance_ws_connected_handler",
                                 )
                                 self.has_been_disconnected = False
                             asyncio.create_task(self._coro(evt_obj))
