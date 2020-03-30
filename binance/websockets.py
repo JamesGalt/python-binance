@@ -150,7 +150,7 @@ class ReconnectingWebsocket:
             self._log.debug("Socket Closed")
         if self._conn:
             self._conn.cancel()
-            with suppress(syncio.CancelledError):
+            with suppress(asyncio.CancelledError):
                 self._log.debug("Cancelling Task")
                 await self._conn
         self._log.debug("Task Cancelled")
