@@ -2093,7 +2093,7 @@ class AsyncClient(BaseClient):
             await crontab("* * * * *").next()
             async with self._rate_limit_lock:
                 self._rate_limit = self.DEFAULT_MINUTE_RATE_LIMIT
-                self._log.info(f"reset rate limit {self._rate_limit}")
+                self._log.debug(f"reset rate limit {self._rate_limit}")
 
     def _init_session(self):
 
@@ -2112,12 +2112,12 @@ class AsyncClient(BaseClient):
         Raises the appropriate exceptions when necessary; otherwise, returns the
         response.
         """
-        self._log.info(response.headers)
         if not str(response.status).startswith("2"):
             raise BinanceAPIException(response, response.status, await response.text())
         try:
             async with self._rate_limit_lock:
                 self._rate_limit = self.DEFAULT_MINUTE_RATE_LIMIT - int(response.headers["X-MBX-USED-WEIGHT"])
+            self._log.info(f"Requests left: {self._rate_limit}")
             return await response.json(loads=JSON_DECODER)
         except ValueError:
             txt = await response.text()

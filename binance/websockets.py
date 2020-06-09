@@ -14,7 +14,7 @@ from typing import Union
 import orjson
 from aiohttp import ClientSession
 from binance import enums
-from binance.accordian import Dispatch
+from binance.accordian import Signal
 from binance.client import AsyncClient
 from websockets.client import WebSocketClientProtocol
 from websockets.client import connect
@@ -35,7 +35,8 @@ class ReconnectingWebsocket:
         path: str,
         coro: Callable,
         prefix: str = "ws/",
-        dispatch: Optional[Dispatch] = None,
+        binance_ws_connected: Optional[Signal] = None,
+        binance_ws_disconnected: Optional[Signal] = None,
     ) -> None:
         self._loop = loop
         self._log = logging.getLogger(__name__)
@@ -43,13 +44,14 @@ class ReconnectingWebsocket:
         self._coro = coro
         self._prefix = prefix
 
-        self.dispatch = dispatch
-
         self._reconnects = 0
         self._conn: Optional[asyncio.Future] = None
         self._socket: Optional[WebSocketClientProtocol] = None
         self.has_been_disconnected = False
         self.last_msg: Optional[Dict] = None
+
+        self.binance_ws_connected = binance_ws_connected
+        self.binance_ws_disconnected = binance_ws_disconnected
 
         self._connect()
 
@@ -62,13 +64,15 @@ class ReconnectingWebsocket:
 
         ws_url = self.STREAM_URL + self._prefix + self._path
         try:
-            async with connect(ws_url, ping_interval=2, ping_timeout=2, timeout=self.TIMEOUT,) as _socket:
+            async with connect(
+                ws_url, ping_interval=2, ping_timeout=2, timeout=self.TIMEOUT, close_timeout=1
+            ) as _socket:
                 self._log.warning(f"Connected to {self._path}")
                 self._socket = _socket
                 self._reconnects = 0
                 while keep_waiting:
                     try:
-                        evt = await asyncio.wait_for(self._socket.recv(), timeout=2)
+                        evt = await asyncio.wait_for(self._socket.recv(), timeout=self.TIMEOUT)
                     except (asyncio.TimeoutError, ConnectionClosed):
                         try:
                             pong = await self._socket.ping()
@@ -83,15 +87,8 @@ class ReconnectingWebsocket:
                         except (orjson.JSONDecodeError, orjson.JSONEncodeError):
                             self._log.error(f"error parsing evt json:{str(evt)}")
                         else:
-                            if (
-                                self.dispatch
-                                and self.has_been_disconnected
-                                and "binance_ws_disconnected" in self.dispatch._handlers
-                            ):
-                                asyncio.create_task(
-                                    self.dispatch.trigger("binance_ws_connected", {"path": self._path, "msg": evt_obj}),
-                                    name=f"{self._path}binance_ws_connected_handler",
-                                )
+                            if self.binance_ws_connected and self.has_been_disconnected:
+                                self.binance_ws_connected.send(**{"path": self._path, "msg": evt_obj})
                                 self.has_been_disconnected = False
                             asyncio.create_task(self._coro(evt_obj))
                             self.last_msg = evt_obj
@@ -118,11 +115,8 @@ class ReconnectingWebsocket:
 
     async def _reconnect(self) -> None:
         await self.cancel()
-        if self.dispatch and "binance_ws_disconnected" in self.dispatch._handlers and not self.has_been_disconnected:
-            asyncio.create_task(
-                self.dispatch.trigger("binance_ws_disconnected", {"path": self._path, "msg": self.last_msg}),
-                name=f"{self._path}_binance_ws_disconnected_handler",
-            )
+        if self.binance_ws_disconnected and not self.has_been_disconnected:
+            self.binance_ws_disconnected.send(**{"path": self._path, "msg": self.last_msg})
         self.has_been_disconnected = True
         self._reconnects += 1
         if self._reconnects < self.MAX_RECONNECTS:
@@ -166,7 +160,11 @@ class BinanceSocketManager:
     _user_timeout = 30 * 60  # 30 minutes
 
     def __init__(
-        self, client: AsyncClient, loop: asyncio.AbstractEventLoop, dispatch: Optional[Dispatch] = None,
+        self,
+        client: AsyncClient,
+        loop: asyncio.AbstractEventLoop,
+        binance_ws_connected: Optional[Signal] = None,
+        binance_ws_disconnected: Optional[Signal] = None,
     ) -> None:
         """Initialise the BinanceSocketManager
 
@@ -182,19 +180,17 @@ class BinanceSocketManager:
         self._loop = loop
         self._log = logging.getLogger(__name__)
 
-        self.dispatch = dispatch
-        if self.dispatch:
-            dispatch.register(f"binance_ws_connected", ["path", "msg"])
-            dispatch.register(f"binance_ws_disconnected", ["path", "msg"])
-
-        asyncio.create_task(self.dispatch.start(), name="dispatcher")
+        self.binance_ws_connected = binance_ws_connected
+        self.binance_ws_disconnected = binance_ws_disconnected
 
     async def _start_socket(self, path: str, coro: Callable, prefix: str = "ws/") -> Optional[str]:
 
         if path in self._conns:
             return None
 
-        self._conns[path] = ReconnectingWebsocket(self._loop, path, coro, prefix, self.dispatch)
+        self._conns[path] = ReconnectingWebsocket(
+            self._loop, path, coro, prefix, self.binance_ws_connected, self.binance_ws_disconnected
+        )
 
         return path
 
